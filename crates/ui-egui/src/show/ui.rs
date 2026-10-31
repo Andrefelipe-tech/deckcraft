@@ -2,6 +2,7 @@ use super::keys::keyboard;
 use super::media::{
     Pick, Under, gif_hit, media_bar_target, media_hit, on_screen, pointer_on_media_bar, run_media_cues, shapes_under_pointer, show_media,
 };
+use super::presenter;
 use super::presenter::{PresenterTimer, presenter_window};
 use super::render::{below_playing_video, fit, part_textures, quad_mesh, render_frame, render_overlay, render_threads, start_prefetch};
 use super::zoom::{
@@ -72,6 +73,12 @@ pub fn ui(app: &mut SlideApp, ui: &mut Ui) {
     }
     show.observe_visible_frame(now, web_time::Instant::now());
     begin_show(&ctx, &mut show, &doc, now);
+
+    if show.dual_monitor {
+        run_dual_monitor(app, ui, &ctx, show, doc_uid, &doc, now);
+        return;
+    }
+
     let mut out = Out { keep: keyboard(&ctx, &mut show, &doc, now, false), actions: vec![] };
     let (clicked, secondary, moved) = ctx.input(|i| (i.pointer.primary_clicked(), i.pointer.secondary_clicked(), i.pointer.delta().length() > 0.0));
     if moved {
@@ -94,6 +101,27 @@ pub fn ui(app: &mut SlideApp, ui: &mut Ui) {
     draw_pen_and_hints(ui, &mut show, &f, &painter, pointing);
     draw_bars(ui, &mut show, &f, &painter, &mut out);
     draw_extras(&mut show, &f, &painter, &mut out);
+    finish(app, show, &f, out.keep);
+}
+
+/// Two real OS windows, one `Show`: this window (wherever the app already is) becomes the full
+/// Presenter View; a second, chrome-free window opens on the other display and mirrors only the
+/// current slide. Both are painted from the same `show` on the same frame, so a click, a key or a
+/// "Go to Slide" in the Presenter View always lands on the audience window a frame later — there
+/// is no separate channel to fall out of sync, and ending the show (closing either window) tears
+/// both down (#...).
+fn run_dual_monitor(app: &mut SlideApp, ui: &mut Ui, ctx: &egui::Context, mut show: Show, doc_uid: u64, doc: &std::sync::Arc<Presentation>, now: f64) {
+    let keep = keyboard(ctx, &mut show, doc, now, true);
+    show.expire_goto(now);
+    show.tick_triggers(doc, now);
+    let full = ui.max_rect();
+    let f = Fr { ctx, doc, doc_uid, now, full, srect: full, clicked: false, secondary: false, pointer: None };
+    let mut out = Out { keep, actions: vec![] };
+    advance(app, &mut show, &f, &mut out);
+    presenter::presenter_content(ui, &mut show, doc, now, true, &mut out.keep);
+    if out.keep {
+        presenter::output_window(ctx, &mut show, doc, now, &mut out.keep);
+    }
     finish(app, show, &f, out.keep);
 }
 
@@ -121,7 +149,9 @@ fn begin_show(ctx: &egui::Context, show: &mut Show, doc: &Presentation, now: f64
         show.show_start = now;
         show.timer = PresenterTimer::start(now);
         show.last_move = now;
-        if show_fills_screen(show.reading, &doc.show.show_type) {
+        // A dual-monitor show keeps this window normal-sized (it hosts the Presenter View); the
+        // audience's own window goes full-screen on the other display instead (`output_window`).
+        if show_fills_screen(show.reading, &doc.show.show_type) && !show.dual_monitor {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
         }
         show.after_enter(doc, now);

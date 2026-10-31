@@ -27,6 +27,9 @@ web-time = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 craft-update = { workspace = true }
+# Real monitor geometry for the Slide Show's dual-window Presenter View: which displays are
+# connected, right now, from the operating system itself (never a guessed or fixed position).
+display-info = "0.5"
 
 [dev-dependencies]
 skrifa = { workspace = true }

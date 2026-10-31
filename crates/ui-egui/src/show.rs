@@ -14,6 +14,7 @@ use crate::theme;
 
 mod keys;
 mod media;
+mod monitors;
 mod presenter;
 mod render;
 mod ui;
@@ -39,6 +40,10 @@ pub struct Show {
     pub state: ShowState,
     pub reading: bool,
     pub presenter: bool,
+    /// Set once, when the show starts: a second display was connected, so the Presenter View
+    /// takes this window and a second, chrome-free window on the other display carries the
+    /// slide to the audience, instead of this window going full-screen itself.
+    pub(crate) dual_monitor: bool,
     /// Preview from the Transitions/Animations tab: exits after the current slide.
     pub preview_only: bool,
     /// Play every step automatically (animation preview).
@@ -197,12 +202,19 @@ pub(crate) fn viewport_visible(ctx: &egui::Context) -> bool {
 impl Show {
     /// Initialise show state at the requested slide with reading/presenter modes; an out-of-range
     /// slide starts an ended show.
+    ///
+    /// A second display connected right now (`monitors::has_second_display`) always wins over the
+    /// Presenter View preference: DeckCraft never mirrors the same content on both screens, so
+    /// with two or more displays the show is a Presenter View on this window and a clean,
+    /// slide-only window on the other display, whatever `presenter` asked for.
     pub fn new(doc: &Presentation, from: usize, reading: bool, presenter: bool) -> Self {
+        let dual_monitor = !reading && monitors::has_second_display();
         Show {
             instance: 0,
             state: ShowState::start_at(doc, from),
             reading,
-            presenter,
+            presenter: presenter || dual_monitor,
+            dual_monitor,
             preview_only: false,
             autoplay: false,
             rehearse: false,
