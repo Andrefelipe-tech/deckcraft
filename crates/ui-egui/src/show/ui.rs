@@ -115,14 +115,40 @@ fn run_dual_monitor(app: &mut SlideApp, ui: &mut Ui, ctx: &egui::Context, mut sh
     show.expire_goto(now);
     show.tick_triggers(doc, now);
     let full = ui.max_rect();
-    let f = Fr { ctx, doc, doc_uid, now, full, srect: full, clicked: false, secondary: false, pointer: None };
+    let srect = fit(full, doc);
+    let f = Fr { ctx, doc, doc_uid, now, full, srect, clicked: false, secondary: false, pointer: None };
     let mut out = Out { keep, actions: vec![] };
     advance(app, &mut show, &f, &mut out);
+    // The single-window path renders `show.tex` as a side effect of painting the audience view
+    // (`draw_slide`); this path paints no audience view on the root window (that's
+    // `output_window`'s job on the other monitor), so the texture is rendered here instead —
+    // both `presenter_content`'s current-slide pane and `output_window` read it afterwards.
+    ensure_slide_texture(app, &mut show, &f);
     presenter::presenter_content(ui, &mut show, doc, now, true, &mut out.keep);
     if out.keep {
         presenter::output_window(ctx, &mut show, doc, now, &mut out.keep);
     }
     finish(app, show, &f, out.keep);
+}
+
+/// Render the current slide into `show.tex` (and prefetch the next one), without drawing it
+/// anywhere — the dual-monitor root window doesn't paint the audience view itself.
+fn ensure_slide_texture(app: &mut SlideApp, show: &mut Show, f: &Fr) {
+    if show.ended {
+        return;
+    }
+    let Fr { ctx, srect, .. } = *f;
+    let ppp = ctx.pixels_per_point();
+    let size = crate::textures::fit_size(
+        ((srect.width() * ppp).round().clamp(1.0, u32::MAX as f32) as u32, (srect.height() * ppp).round().clamp(1.0, u32::MAX as f32) as u32),
+        crate::textures::max_side(ctx),
+    );
+    let sl = begin_slide(app, show, f, size);
+    frame_texture(show, f, &sl);
+    prefetch_next(app, show, f, &sl);
+    if sl.animating {
+        ctx.request_repaint();
+    }
 }
 
 fn paint_hidden(ui: &Ui, doc: &Presentation, show: &Show) {

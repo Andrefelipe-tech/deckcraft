@@ -2,6 +2,12 @@ use super::keys::keyboard;
 use super::render::{fit, next_rect};
 use super::zoom::{Zoom, grid_indices, paint_grid, see_all_hit, slide_aspect, toggle_blank, zoom_frame};
 use super::{Align2, Color32, CornerRadius, Pos2, Presentation, Rect, RenderOpts, Sense, Show, Stroke, Ui, pos2, theme, vec2};
+use crate::icons::{self, Icon};
+
+/// DeckCraft's own brand orange — the presenter chrome is always dark regardless of the app's
+/// light/dark setting (a presenter screen is read in a dim room), so this is the fixed accent
+/// for it rather than a theme lookup that could resolve to the light palette.
+const ACCENT: Color32 = Color32::from_rgb(0xF2, 0x6B, 0x1D);
 
 pub(super) const NOTES_DEFAULT: f32 = 18.0;
 
@@ -124,9 +130,32 @@ pub(super) fn presenter_content(ui: &mut Ui, show: &mut Show, doc: &Presentation
     let mut actions = vec![];
     let elapsed = show.timer.elapsed(now);
     let paused = show.timer.paused();
-    // The presenter window is dark; default buttons draw dark text on it (#221).
-    let button = |ui: &mut Ui, s: &str| {
-        ui.add(egui::Button::new(egui::RichText::new(s).size(15.0).color(Color32::WHITE)).fill(Color32::from_gray(60)).min_size(vec2(0.0, 30.0)))
+    let has_next = next.is_some();
+    // A plain dark-chrome text button (End Show; small text chips in the toolbar strip).
+    let text_button = |ui: &mut Ui, s: &str, fill: Color32| {
+        ui.add(egui::Button::new(egui::RichText::new(s).size(14.0).color(Color32::WHITE)).fill(fill).min_size(vec2(0.0, 28.0)))
+    };
+    // A square icon button for the toolbar under the current slide (pen, eraser, grid, zoom…):
+    // filled with the accent when the thing it controls is on.
+    let icon_btn = |ui: &mut Ui, icon: Icon, tip: &str, on: bool| -> egui::Response {
+        let (rect, resp) = ui.allocate_exact_size(vec2(36.0, 32.0), Sense::click());
+        let painter = ui.painter_at(rect);
+        let fill = if on { ACCENT } else if resp.hovered() { Color32::from_gray(74) } else { Color32::from_gray(52) };
+        painter.rect_filled(rect, CornerRadius::same(6), fill);
+        icons::paint(&painter, rect.shrink(7.0), icon, Color32::WHITE, false);
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tip));
+        resp.on_hover_text(tip)
+    };
+    // A round chevron overlaid on the slide's own edge, to step through the show without
+    // reaching for the toolbar — only drawn when that direction actually goes somewhere.
+    let nav_btn = |ui: &mut Ui, center: Pos2, icon: Icon, tip: &str| -> egui::Response {
+        let rect = Rect::from_center_size(center, vec2(40.0, 40.0));
+        let resp = ui.interact(rect, ui.scope_id().with(tip), Sense::click());
+        let painter = ui.painter_at(rect);
+        painter.circle_filled(rect.center(), rect.width() * 0.5, if resp.hovered() { Color32::from_black_alpha(220) } else { Color32::from_black_alpha(150) });
+        icons::paint(&painter, rect.shrink(11.0), icon, Color32::WHITE, false);
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tip));
+        resp.on_hover_text(tip)
     };
     egui::CentralPanel::default().frame(egui::Frame::NONE.fill(Color32::from_gray(24)).inner_margin(egui::Margin::same(16))).show(ui, |ui| {
         ui.horizontal(|ui| {
@@ -136,36 +165,10 @@ pub(super) fn presenter_content(ui: &mut Ui, show: &mut Show, doc: &Presentation
             ui.add_space(20.0);
             ui.label(egui::RichText::new(format!("Slide {} of {}", cur + 1, doc.slides.len())).size(16.0).color(Color32::from_gray(200)));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if button(ui, "End Show").clicked() {
+                if text_button(ui, "End Show", Color32::from_rgb(0xB0, 0x2E, 0x2E)).clicked() {
                     *keep = false;
                 }
-                if button(ui, "Next ▶").clicked() {
-                    actions.push(show.state.next(doc));
-                }
-                if button(ui, "◀ Previous").clicked() {
-                    actions.push(show.state.prev(doc));
-                }
             });
-        });
-        ui.horizontal(|ui| {
-            if button(ui, if paused { "Resume" } else { "Pause" }).clicked() {
-                show.timer.toggle(now);
-            }
-            if button(ui, "Reset").clicked() {
-                show.timer.reset(now);
-            }
-            if button(ui, if show.blank == Some(Color32::BLACK) { "Black on" } else { "Black" }).clicked() {
-                toggle_blank(show, Color32::BLACK);
-            }
-            if button(ui, if show.blank == Some(Color32::WHITE) { "White on" } else { "White" }).clicked() {
-                toggle_blank(show, Color32::WHITE);
-            }
-            if button(ui, if show.presenter_grid { "All slides on" } else { "All slides" }).clicked() {
-                show.presenter_grid = !show.presenter_grid;
-            }
-            if button(ui, show.zoom_label()).clicked() {
-                show.zoom_key();
-            }
         });
         ui.add_space(8.0);
         let avail = ui.available_rect_before_wrap();
@@ -188,10 +191,16 @@ pub(super) fn presenter_content(ui: &mut Ui, show: &mut Show, doc: &Presentation
         }
         let left = Rect::from_min_max(avail.min, pos2(avail.min.x + avail.width() * 0.62, avail.max.y));
         let right = Rect::from_min_max(pos2(left.max.x + 16.0, avail.min.y), avail.max);
-        let cr = fit(Rect::from_min_max(left.min, pos2(left.max.x, left.min.y + left.height() * 0.8)), doc);
+        // The toolbar strip lives under the slide, in the band the old 80%-height current-slide
+        // image left empty; the slide itself is fit to what's left above it.
+        let toolbar_h = 40.0;
+        let slide_band = Rect::from_min_max(left.min, pos2(left.max.x, left.max.y - toolbar_h - 10.0));
+        let cr = fit(slide_band, doc);
         let cr = Rect::from_min_size(left.min, cr.size());
         if let Some(t) = &cur_tex {
             ui.painter().image(t.id(), cr, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        } else {
+            ui.painter().rect_filled(cr, CornerRadius::ZERO, Color32::from_gray(40));
         }
         if let Some(z) = show.zoom {
             let mark = zoom_frame(cr, z.uv());
@@ -212,6 +221,51 @@ pub(super) fn presenter_content(ui: &mut Ui, show: &mut Show, doc: &Presentation
         if let Some(c) = show.blank {
             ui.painter().rect_filled(cr, CornerRadius::ZERO, c);
         }
+        // Previous/Next as round chevrons over the slide's own left/right edge — PowerPoint's own
+        // click-to-advance affordance — instead of the old top-bar text buttons.
+        if cur > 0 && cr.width() > 90.0 && nav_btn(ui, pos2(cr.min.x + 26.0, cr.center().y), Icon::ChevronLeft, "Previous").clicked() {
+            actions.push(show.state.prev(doc));
+        }
+        if has_next && cr.width() > 90.0 && nav_btn(ui, pos2(cr.max.x - 26.0, cr.center().y), Icon::ChevronRight, "Next").clicked() {
+            actions.push(show.state.next(doc));
+        }
+        // The icon toolbar strip, directly under the slide.
+        let toolbar = Rect::from_min_max(pos2(left.min.x, slide_band.max.y + 10.0), pos2(left.max.x, left.max.y));
+        let mut tb = ui.new_child(egui::UiBuilder::new().max_rect(toolbar));
+        tb.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if icon_btn(ui, Icon::Pen, "Pen", show.pen).clicked() {
+                show.set_pen(!show.pen);
+            }
+            if icon_btn(ui, Icon::Eraser, "Erase Ink", false).clicked() {
+                show.strokes.clear();
+            }
+            if icon_btn(ui, Icon::Grid, "See All Slides", show.presenter_grid).clicked() {
+                show.presenter_grid = !show.presenter_grid;
+            }
+            if icon_btn(ui, Icon::Zoom, "Zoom Into Slide", show.zoom_arm || show.zoom.is_some()).clicked() {
+                show.zoom_key();
+            }
+            ui.add_space(10.0);
+            if icon_btn(ui, if paused { Icon::Play } else { Icon::Pause }, if paused { "Resume Timer" } else { "Pause Timer" }, paused).clicked() {
+                show.timer.toggle(now);
+            }
+            if text_button(ui, "Reset", Color32::from_gray(52)).on_hover_text("Reset Timer").clicked() {
+                show.timer.reset(now);
+            }
+            if text_button(ui, "Black", if show.blank == Some(Color32::BLACK) { ACCENT } else { Color32::from_gray(52) })
+                .on_hover_text("Black Screen")
+                .clicked()
+            {
+                toggle_blank(show, Color32::BLACK);
+            }
+            if text_button(ui, "White", if show.blank == Some(Color32::WHITE) { ACCENT } else { Color32::from_gray(52) })
+                .on_hover_text("White Screen")
+                .clicked()
+            {
+                toggle_blank(show, Color32::WHITE);
+            }
+        });
         let nr = next_rect(right, doc);
         ui.painter().text(right.min, Align2::LEFT_TOP, "Next", theme::font(13.0), Color32::from_gray(170));
         match &next_tex {
